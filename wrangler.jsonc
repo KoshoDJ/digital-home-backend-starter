@@ -1,8 +1,19 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "main": ".open-next/worker.js",
+  // worker.ts wraps OpenNext's generated handler to add `scheduled` — see the
+  // file header. Reverting to ".open-next/worker.js" disables the cron and
+  // restores stock OpenNext behaviour.
+  "main": "worker.ts",
   "name": "digital-home-backend",
-  "compatibility_date": "2025-09-27",
+  // The CRM engine tick + social publish tick. Was a GitHub Action; GitHub
+  // throttles scheduled workflows, which stalls onboarding email.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  // Keep the workers.dev URL alive; add a custom-domain route here when you
+  // claim one, e.g. { "pattern": "backend.yourdomain.com", "custom_domain": true }
+  "workers_dev": true,
+  "compatibility_date": "2026-05-01",
   "compatibility_flags": [
     "nodejs_compat"
   ],
@@ -14,17 +25,25 @@
     {
       "binding": "WORKER_SELF_REFERENCE",
       "service": "digital-home-backend"
-    }
-  ],
-  "r2_buckets": [
+    },
     {
-      "binding": "NEXT_INC_CACHE_R2_BUCKET",
-      "bucket_name": "digital-home-backend-opennext-cache"
+      "binding": "FRONTEND_WORKER",
+      "service": "digital-home-frontend"
     }
   ],
   "images": {
     "binding": "IMAGES"
   },
+  // Social media files (videos + carousel slides). Make the bucket public by
+  // attaching a custom domain (e.g. media.yourdomain.com) and set
+  // R2_PUBLIC_BASE below to match — Meta ingests by pulling that URL, and R2
+  // egress is free.
+  "r2_buckets": [
+    {
+      "binding": "SOCIAL_MEDIA",
+      "bucket_name": "social-media"
+    }
+  ],
   "observability": {
     "enabled": true
   },
@@ -35,6 +54,7 @@
     "NEXT_PUBLIC_SUPABASE_URL": "https://your-project.supabase.co",
     "NEXT_PUBLIC_SUPABASE_ANON_KEY": "your-anon-key",
     "DIGITAL_HOME_URL": "https://yourdomain.com",
-    "NEXT_PUBLIC_DIGITAL_HOME_URL": "https://yourdomain.com"
+    "NEXT_PUBLIC_DIGITAL_HOME_URL": "https://yourdomain.com",
+    "R2_PUBLIC_BASE": "https://media.yourdomain.com"
   }
 }

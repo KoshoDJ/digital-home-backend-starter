@@ -15,11 +15,30 @@ import { authenticateSessionOrApiKey, unauthorizedResponse } from "@/lib/api/aut
 import { createAdminClient } from "@/lib/supabase/server";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 
 
 const FRONTEND_URL =
   process.env.DIGITAL_HOME_URL || "http://localhost:3000";
 const API_KEY = process.env.API_SECRET_KEY || "";
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+
+/**
+ * Fetch from the Frontend Worker using the service binding (bypasses Workers-to-Workers routing issues).
+ * Falls back to global fetch for local dev where no service binding exists.
+ */
+function frontendFetch(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    const ctx = getCloudflareContext();
+    const binding = ctx.env.FRONTEND_WORKER;
+    if (binding) {
+      return binding.fetch(new Request(`${FRONTEND_URL}${path}`, init));
+    }
+  } catch {
+    // Local dev — no Cloudflare context available
+  }
+  return fetch(`${FRONTEND_URL}${path}`, init);
+}
 
 // ─── Brand context loader ────────────────────────────────────────────────────
 
@@ -62,11 +81,11 @@ async function loadBrandContext(): Promise<BrandContext> {
 // ─── Fetch existing articles for internal linking ────────────────────────────
 
 async function fetchPublishedSlugs(): Promise<
-  { slug: string; title: string }[]
+  { slug: string; title: string; path: string }[]
 > {
   try {
-    const res = await fetch(
-      `${FRONTEND_URL}/api/content?status=published&limit=20`,
+    const res = await frontendFetch(
+      "/api/content?status=published&limit=20",
       { headers: { "x-api-key": API_KEY } }
     );
     if (!res.ok) return [];
@@ -76,6 +95,9 @@ async function fetchPublishedSlugs(): Promise<
       (a: { slug: string; title: string }) => ({
         slug: a.slug,
         title: a.title,
+        // Canonical URL on the site. Adjust if your frontend routes articles
+        // under a different base path.
+        path: `/blog/${a.slug}`,
       })
     );
   } catch {
@@ -85,11 +107,38 @@ async function fetchPublishedSlugs(): Promise<
 
 // ─── Hero image generation ───────────────────────────────────────────────────
 
+function base64ToArrayBuffer(value: string): ArrayBuffer {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+// Rotated deterministically per slug so consecutive articles never share a frame.
+const COMPOSITIONS = [
+  "Composition: vast wide establishing shot, monumental subject dwarfing the frame, atmospheric haze and god rays.",
+  "Composition: low-angle hero shot looking up at a towering subject against a dramatic sky or void.",
+  "Composition: aerial view over a surreal landscape, the subject glowing at its center.",
+  "Composition: interior of a colossal space (temple, vault, engine, cathedral of the idea), light pouring in.",
+  "Composition: a single luminous structure suspended or floating in darkness, energy radiating outward.",
+];
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
 async function generateHeroImage(
   title: string,
   keyword: string,
   slug: string,
-  imageStyle?: string
+  imageStyle?: string,
+  imageConcept?: string
 ): Promise<string | null> {
   if (!process.env.OPENAI_API_KEY) return null;
 
@@ -97,38 +146,53 @@ async function generateHeroImage(
     const openai = new OpenAI();
 
     // Default style if none configured in brand_context
-    const defaultStyle = `Editorial photography style. Clean, modern, professional.
-Composition: Minimal, intentional. One clear subject or metaphor that relates to the article topic.
-Color palette: Muted, sophisticated tones with one accent color. Think Harvard Business Review or Fast Company covers.
-Lighting: Natural, cinematic. Soft shadows, depth of field.
-Mood: Confident, authoritative, forward-thinking.`;
+    const defaultStyle = `Epic cinematic concept art. Monumental scale, surreal, otherworldly.
+Vivid saturated color blooming out of deep darkness: volumetric god rays, glowing energy, luminous materials.
+Hyperdetailed painterly-photoreal hybrid. Never a product photo or flat still life.`;
 
     const styleGuide = imageStyle || defaultStyle;
+    const composition = COMPOSITIONS[hashString(slug) % COMPOSITIONS.length];
+    const subject = imageConcept
+      ? `Subject (build the whole frame around this): ${imageConcept}`
+      : `Subject: one clear physical object or scene that works as a metaphor for the topic "${keyword}".`;
 
     const imagePrompt = `Create a hero image for a blog article titled "${title}" (topic: ${keyword}).
 
+${subject}
+
 ${styleGuide}
+${composition}
 
 CRITICAL RULES:
-- The image must visually relate to the specific topic of "${keyword}" — not be generic
 - ABSOLUTELY NO TEXT. No words, letters, numbers, logos, watermarks, or signatures
-- No stock photo clichés (no handshakes, no people pointing at screens, no thumbs up)`;
+- No documents, charts, screens, books or paper with visible writing — these render as garbled fake text
+- No close-up faces, no handshakes, no people pointing at screens; tiny silhouettes for scale are fine
+- No beige/bronze desk still lifes: no typewriters, chess boards, compasses, padlocks or statues on tables
+- Vivid and readable at thumbnail size: strong color against darkness, clear focal point`;
 
+    const isDalleModel = OPENAI_IMAGE_MODEL.startsWith("dall-e");
     const response = await openai.images.generate({
-      model: "dall-e-3",
+      model: OPENAI_IMAGE_MODEL,
       prompt: imagePrompt,
       n: 1,
-      size: "1792x1024",
-      quality: "hd",
-    });
+      size: isDalleModel ? "1792x1024" : "1536x1024",
+      quality: isDalleModel ? "hd" : "high",
+      ...(isDalleModel ? { response_format: "url" } : {}),
+    } as Parameters<typeof openai.images.generate>[0]);
 
-    const imageUrl = response.data?.[0]?.url;
-    if (!imageUrl) return null;
-
-    // Download the image and upload to Supabase Storage
-    const imageRes = await fetch(imageUrl);
-    if (!imageRes.ok) return null;
-    const imageBuffer = await imageRes.arrayBuffer();
+    const imageResponse = response as unknown as {
+      data?: Array<{ b64_json?: string | null; url?: string | null }>;
+    };
+    const generated = imageResponse.data?.[0];
+    let imageBuffer: ArrayBuffer | null = null;
+    if (generated?.b64_json) {
+      imageBuffer = base64ToArrayBuffer(generated.b64_json);
+    } else if (generated?.url) {
+      const imageRes = await fetch(generated.url);
+      if (!imageRes.ok) return null;
+      imageBuffer = await imageRes.arrayBuffer();
+    }
+    if (!imageBuffer) return null;
 
     const supabase = createAdminClient();
     const fileName = `blog/${slug}-hero.png`;
@@ -294,7 +358,14 @@ export async function POST(request: NextRequest) {
     .eq("key", "publish_mode")
     .single();
 
-  const publishMode = publish_mode === "autonomous" || settingsData?.value === "autonomous" ? "autonomous" : "safe";
+  // Explicit caller intent wins (a caller can force "safe" so its drafts
+  // never auto-publish); otherwise fall back to the global setting.
+  const publishMode =
+    publish_mode === "autonomous" || publish_mode === "safe"
+      ? publish_mode
+      : settingsData?.value === "autonomous"
+        ? "autonomous"
+        : "safe";
   const targetStatus = publishMode === "autonomous" ? "published" : "draft";
 
   // 3. Mark as writing
@@ -311,8 +382,8 @@ export async function POST(request: NextRequest) {
     ]);
 
     const internalLinks = publishedArticles.length > 0
-      ? `\n\nExisting articles for internal linking:\n${publishedArticles
-          .map((a) => `- /blog/${a.slug} — "${a.title}"`)
+      ? `\n\nExisting articles for internal linking (use these exact paths — they are the canonical URLs):\n${publishedArticles
+          .map((a) => `- ${a.path} — "${a.title}"`)
           .join("\n")}`
       : "";
 
@@ -333,7 +404,8 @@ IMPORTANT RULES:
 - Write in the brand voice defined above. Follow the voice guide, tone examples, and banned phrases strictly.
 - Match the tone and style in the tone examples — study them carefully. They define how the brand actually sounds.
 - Reading level: 9th grade. Short sentences. Plain words. No jargon.
-- Article length: MINIMUM 1,500 words, target 2,000-2,500 words. This is non-negotiable. Short articles get rejected.
+- Article length: MINIMUM 2,000 words, target 2,500-3,500 words. This is non-negotiable. Short articles get rejected.
+- Depth over breadth: this publishes a few times a week, not daily — every article must earn its slot. Ground every major claim in something concrete: a named example, a number, a step the reader can take today, or a real case from the brand context. If a section could appear on any competitor's blog unchanged, rewrite it with the brand's specific frameworks and stories.
 - Every paragraph should be a dense, contextually complete semantic unit. Prefer paragraph-based exposition over bullet points.
 - Do NOT include the article title as an H1 or H2 at the start of the body — the website renders the title separately above the article. Start the body directly with the hook paragraph.
 - Use HTML formatting: <h2>, <h3>, <p>, <blockquote>, <ul>, <li>, <strong>, <em>, <a> tags
@@ -342,13 +414,17 @@ ${ctaInstruction}
 - CRITICAL: In the "body" field, escape all double quotes inside HTML attributes using \\" so the JSON stays valid. For example: <a href=\\"https://example.com\\">text</a>
 - Do NOT include any text before or after the JSON object`;
 
+    const pillarDirective = entry.pillar_topic
+      ? `\nContent pillar: ${entry.pillar_topic} — this article ARGUES this pillar. Anchor it in that pillar's framework and signature story from the brand context (see "Content pillars" there). A reader who follows the brand's other channels should recognize the same argument in written form.`
+      : "";
+
     const userPrompt = `Write a full article for this topic:
 
 Title: ${entry.title}
 Target keyword: ${entry.target_keyword || "not specified"}
 Keyword cluster: ${entry.keyword_cluster || "not specified"}
 Intent type: ${entry.intent_type || "informational"}
-Priority: ${entry.priority || "medium"}
+Priority: ${entry.priority || "medium"}${pillarDirective}
 
 Follow this structure:
 1. Hook — provocative statement, vivid anecdote, or counterintuitive claim
@@ -363,7 +439,7 @@ SEO requirements:
 - Integrate target keyword 3-5 times naturally
 - Use descriptive H2 headings (2-3 as direct questions)
 - Include the target keyword in the first paragraph and one H2
-- Include 2-3 internal links to existing articles where relevant (use <a href="/blog/slug">text</a>)
+- Include 2-3 internal links to existing articles where relevant, using the exact canonical paths from the list above (e.g. <a href="/blog/slug">text</a>)
 
 FAQ section:
 - After the CTA, add an FAQ section with 4-6 questions and answers
@@ -379,9 +455,11 @@ Return a JSON object with EXACTLY these fields:
   "slug": "url-safe-slug",
   "body": "full HTML article body including FAQ section at the end",
   "excerpt": "150-200 character excerpt",
+  "pull_quote": "the article's single most quotable line: a SHORT declarative statement, 8-14 words, punchy enough to stand alone on a poster. A claim, not an instruction — never starts with 'Learn' or 'Discover', no em dashes.",
   "semantic_tags": ["tag1", "tag2", "tag3"],
   "target_segments": ["segment1"],
   "content_type": "article",
+  "image_concept": "one sentence describing a monumental, surreal SCENE that embodies THIS article's core argument as a world (not an object on a table) — epic scale, a clear focal structure, room for dramatic light. Derive it from the argument, not the keyword. No text, no faces, no documents, charts or screens.",
   "faqs": [{"question": "Q1?", "answer": "A1"}, {"question": "Q2?", "answer": "A2"}],
   "seo": {
     "title": "SEO meta title under 60 chars",
@@ -395,7 +473,7 @@ Return a JSON object with EXACTLY these fields:
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 8192,
+      max_tokens: 16384,
       messages: [{ role: "user", content: userPrompt }],
       system: systemPrompt,
     });
@@ -413,6 +491,8 @@ Return a JSON object with EXACTLY these fields:
       semantic_tags: string[];
       target_segments: string[];
       content_type: string;
+      image_concept?: string;
+      pull_quote?: string;
       faqs?: { question: string; answer: string }[];
       seo: {
         title: string;
@@ -502,13 +582,16 @@ Return a JSON object with EXACTLY these fields:
       articleData.title,
       entry.target_keyword || articleData.semantic_tags?.[0] || "business technology",
       articleData.slug,
-      brand.imageStyle
+      brand.imageStyle,
+      articleData.image_concept
     );
 
     // 8. Save via Frontend API
     const publishPayload = {
       slug: articleData.slug,
       title: articleData.title,
+      // The pull quote lives in `subtitle` — sites can render it as a quote tile.
+      subtitle: articleData.pull_quote || null,
       body: articleData.body,
       excerpt: articleData.excerpt,
       content_type: articleData.content_type || "article",
@@ -528,7 +611,7 @@ Return a JSON object with EXACTLY these fields:
 
     let articleResult: { id?: string; slug?: string } | null = null;
 
-    const publishRes = await fetch(`${FRONTEND_URL}/api/content`, {
+    const publishRes = await frontendFetch("/api/content", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -545,7 +628,7 @@ Return a JSON object with EXACTLY these fields:
         (errData.error && errData.error.includes("duplicate"))
       ) {
         publishPayload.slug = `${articleData.slug}-${Date.now().toString(36).slice(-4)}`;
-        const retryRes = await fetch(`${FRONTEND_URL}/api/content`, {
+        const retryRes = await frontendFetch("/api/content", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -591,7 +674,7 @@ Return a JSON object with EXACTLY these fields:
       .eq("id", calendar_entry_id);
 
     // 9. Log the action (non-blocking)
-    fetch(`${FRONTEND_URL}/api/agent-logs`, {
+    frontendFetch("/api/agent-logs", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

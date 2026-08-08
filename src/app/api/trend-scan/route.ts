@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
 import { authenticateSessionOrApiKey, unauthorizedResponse } from "@/lib/api/auth";
+import { callModel } from "@/lib/crm/ai";
 import { createAdminClient } from "@/lib/supabase/server";
+import { attributionPromptBlock } from "@/lib/crm/attribution";
 import type { Database, Json } from "@/types/database";
 
 type TrendScanConfig = {
@@ -130,6 +131,24 @@ function looksLikeDuplicate(candidate: CandidateEntry, existing: Set<string>): b
   });
 }
 
+const FEED_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+  Accept: "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+};
+
+async function fetchRssItems(url: string, label: string): Promise<RegExpMatchArray[]> {
+  const response = await fetch(url, { cache: "no-store", headers: FEED_HEADERS });
+  if (!response.ok) {
+    console.warn(`trend feed ${label} responded ${response.status}`);
+    return [];
+  }
+  const xml = await response.text();
+  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+  console.log(`trend feed ${label}: ${items.length} items`);
+  return items;
+}
+
 async function fetchTrendFeed(query: string, config: TrendScanConfig): Promise<TrendItem[]> {
   const params = new URLSearchParams({
     q: `${query} ${config.include_terms.join(" ")} when:7d`,
@@ -138,12 +157,19 @@ async function fetchTrendFeed(query: string, config: TrendScanConfig): Promise<T
     ceid: `${config.country}:${config.locale.split("-")[0]}`,
   });
 
-  const url = `https://news.google.com/rss/search?${params.toString()}`;
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) return [];
-
-  const xml = await response.text();
-  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
+  // Google News often serves Cloudflare Workers a consent page with no items,
+  // so fall back to Bing News RSS (same <item> shape) when Google returns none.
+  let items = await fetchRssItems(
+    `https://news.google.com/rss/search?${params.toString()}`,
+    `google:${query}`
+  );
+  if (items.length === 0) {
+    const bingParams = new URLSearchParams({ q: query, format: "rss" });
+    items = await fetchRssItems(
+      `https://www.bing.com/news/search?${bingParams.toString()}`,
+      `bing:${query}`
+    );
+  }
 
   return items.slice(0, config.max_headlines_per_domain).map((match) => {
     const block = match[1];
@@ -272,11 +298,18 @@ export async function POST(request: NextRequest) {
     existingKeys.add(normalize(entry.target_keyword));
   }
 
-  const anthropic = new Anthropic();
   const runId = `TRENDS-${new Date().toISOString().slice(0, 10)}`;
+  // Explicit caller intent wins (an agent can ask for "planned" so its scans
+  // always pass through the owner's eyes); otherwise the global publish mode
+  // decides, as before.
   const targetStatus: NonNullable<
     Database["public"]["Tables"]["content_calendar"]["Insert"]["status"]
-  > = publishMode === "autonomous" ? "approved" : "planned";
+  > =
+    body.target_status === "planned" || body.target_status === "approved"
+      ? body.target_status
+      : publishMode === "autonomous"
+        ? "approved"
+        : "planned";
 
   const promptPayload = trendItems.slice(0, 30).map((item, index) => ({
     index: index + 1,
@@ -313,6 +346,10 @@ Rules:
   ]
 }`;
 
+  // Bias topic selection toward content that has already converted visitors
+  // into leads (empty string until attribution has signal).
+  const attribution = await attributionPromptBlock(supabase).catch(() => "");
+
   const userPrompt = `Audience:
 ${config.audience_description}
 
@@ -321,19 +358,11 @@ ${config.keyword_clusters.join(", ")}
 
 Avoid topics about:
 ${config.exclude_terms.join(", ")}
-
+${attribution}
 Create up to ${maxNewEntries} new content calendar entries from these recent trend headlines:
 ${JSON.stringify(promptPayload, null, 2)}`;
 
-  const completion = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [{ role: "user", content: userPrompt }],
-  });
-
-  const responseText =
-    completion.content[0]?.type === "text" ? completion.content[0].text : "";
+  const { text: responseText } = await callModel(systemPrompt, userPrompt, 4096);
 
   let parsed: { entries?: CandidateEntry[] };
   try {

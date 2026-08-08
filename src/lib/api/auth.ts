@@ -2,10 +2,23 @@ import { NextRequest } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 import { createClient } from "@/lib/supabase/server";
 
+/**
+ * Session roles. 'admin' is the default (any user without an explicit role in
+ * app_metadata). 'social' is the social media manager: full run of /social,
+ * nothing else. API keys are unaffected.
+ */
+export type SessionRole = "admin" | "social";
+
 export type AuthResult =
-  | { authenticated: true; mode: "session"; userId: string }
+  | { authenticated: true; mode: "session"; userId: string; role: SessionRole }
   | { authenticated: true; mode: "api-key"; agent: string }
   | { authenticated: false; error: string };
+
+export interface AuthOptions {
+  /** Session roles allowed on this route. Defaults to admin-only, so the
+   *  social role has to be explicitly opted in by the /api/social routes. */
+  allowRoles?: SessionRole[];
+}
 
 const DEFAULT_SIGNATURE_TTL_SECONDS = 300;
 
@@ -112,7 +125,7 @@ async function validateApiSignature(request: NextRequest): Promise<AuthResult> {
   return keyValidation;
 }
 
-async function validateSession(): Promise<AuthResult> {
+async function validateSession(opts: AuthOptions = {}): Promise<AuthResult> {
   try {
     const supabase = await createClient();
     const {
@@ -124,28 +137,37 @@ async function validateSession(): Promise<AuthResult> {
       return { authenticated: false, error: "Not authenticated" };
     }
 
-    return { authenticated: true, mode: "session", userId: user.id };
+    const role: SessionRole =
+      (user.app_metadata as { role?: string } | null)?.role === "social" ? "social" : "admin";
+    const allowed = opts.allowRoles || ["admin"];
+    if (!allowed.includes(role)) {
+      return { authenticated: false, error: "This account only has access to the social studio" };
+    }
+
+    return { authenticated: true, mode: "session", userId: user.id, role };
   } catch {
     return { authenticated: false, error: "Session validation failed" };
   }
 }
 
 export async function authenticateSession(
-  _request: NextRequest
+  _request: NextRequest,
+  opts: AuthOptions = {}
 ): Promise<AuthResult> {
   void _request;
-  return validateSession();
+  return validateSession(opts);
 }
 
 export async function authenticateSessionOrApiKey(
-  request: NextRequest
+  request: NextRequest,
+  opts: AuthOptions = {}
 ): Promise<AuthResult> {
   const apiKey = request.headers.get("x-api-key");
   if (apiKey) {
     return validateApiSignature(request);
   }
 
-  return validateSession();
+  return validateSession(opts);
 }
 
 export function unauthorizedResponse(error: string = "Unauthorized") {

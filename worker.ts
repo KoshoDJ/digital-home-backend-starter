@@ -1,0 +1,111 @@
+/**
+ * Custom worker entrypoint.
+ *
+ * OpenNext generates `.open-next/worker.js` with only a `fetch` handler. We
+ * wrap it here to add `scheduled`, so the CRM engine tick and the social
+ * publish tick run on a native Cloudflare cron instead of a GitHub Action.
+ *
+ * Why the move: a scheduled GitHub Action is throttled — in practice it can
+ * deliver roughly hourly and then go silent for hours, so time-critical
+ * onboarding email simply never fires. Every run "succeeds"; the emails just
+ * don't go out. Cloudflare cron is first-party to the worker and doesn't get
+ * deprioritised.
+ *
+ * Both jobs are driven through synthetic requests to the app's own routes
+ * rather than by importing their internals directly. That keeps one code path
+ * for both manual and scheduled runs, guarantees the Next.js request context
+ * (env, async local storage) is initialised the way the routes already expect,
+ * and — because the request never leaves the worker — skips any zone WAF that
+ * blocks non-browser user agents.
+ */
+import openNextHandler from "./.open-next/worker.js";
+
+export { DOQueueHandler, DOShardedTagCache, BucketCachePurge } from "./.open-next/worker.js";
+
+const TICK_PATH = "/api/crm/tick";
+const SOCIAL_TICK_PATH = "/api/social/tick";
+
+/**
+ * Origin for the synthetic self-requests. The request is handed straight to
+ * the OpenNext handler and never leaves the worker, so this only needs to be
+ * a well-formed URL — set BACKEND_ORIGIN in wrangler.jsonc `vars` if your
+ * routes ever depend on the host header.
+ */
+function origin(env: CloudflareEnv): string {
+  return (env as unknown as Record<string, string>).BACKEND_ORIGIN || "https://backend.localhost";
+}
+
+async function hmacHex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * POST a signed machine request to one of our own routes.
+ * Signature contract (src/lib/api/auth.ts): METHOD:pathname:timestamp:body.
+ */
+async function callSigned(
+  env: CloudflareEnv,
+  ctx: ExecutionContext,
+  path: string,
+  payload: Record<string, unknown>
+): Promise<Response> {
+  const secret = (env as unknown as Record<string, string>).API_SECRET_KEY;
+  if (!secret) throw new Error("API_SECRET_KEY missing from env");
+
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const body = JSON.stringify(payload);
+  const signature = await hmacHex(secret, `POST:${path}:${timestamp}:${body}`);
+
+  return openNextHandler.fetch(
+    new Request(`${origin(env)}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": secret,
+        "x-timestamp": timestamp,
+        "x-signature": signature,
+      },
+      body,
+    }),
+    env,
+    ctx
+  );
+}
+
+async function runTick(env: CloudflareEnv, ctx: ExecutionContext): Promise<void> {
+  try {
+    const response = await callSigned(env, ctx, TICK_PATH, {});
+    if (!response.ok) {
+      console.error(`crm tick cron: ${response.status} ${(await response.text()).slice(0, 300)}`);
+    }
+  } catch (e) {
+    console.error(`crm tick cron: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+async function runSocialTick(env: CloudflareEnv, ctx: ExecutionContext): Promise<void> {
+  try {
+    const response = await callSigned(env, ctx, SOCIAL_TICK_PATH, {});
+    if (!response.ok) {
+      console.error(`social tick cron: ${response.status} ${(await response.text()).slice(0, 300)}`);
+    }
+  } catch (e) {
+    console.error(`social tick cron: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+export default {
+  fetch: openNextHandler.fetch,
+  async scheduled(_controller: ScheduledController, env: CloudflareEnv, ctx: ExecutionContext) {
+    ctx.waitUntil(runTick(env, ctx));
+    ctx.waitUntil(runSocialTick(env, ctx));
+  },
+} satisfies ExportedHandler<CloudflareEnv>;
