@@ -11,6 +11,7 @@ import {
   CAROUSEL_MIN_SLIDES,
   CAROUSEL_PLATFORMS,
 } from "@/lib/social/types";
+import { checkLengthLimits, formatLengthViolations } from "@/lib/social/limits";
 
 export async function GET(request: NextRequest) {
   const auth = await authenticateSessionOrApiKey(request, { allowRoles: ["admin", "social"] });
@@ -142,11 +143,26 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const caption = body.caption || "";
+  const title = body.title?.trim() || null;
+  if (accounts.length) {
+    const violations = checkLengthLimits(
+      accounts.map((a) => a.platform),
+      { caption, title }
+    );
+    if (violations.length) {
+      return NextResponse.json(
+        { error: `Post is too long for the selected platform(s): ${formatLengthViolations(violations)}` },
+        { status: 400 }
+      );
+    }
+  }
+
   const { data: post, error: postError } = await supabase
     .from("social_posts")
     .insert({
-      title: body.title?.trim() || null,
-      caption: body.caption || "",
+      title,
+      caption,
       post_type: postType,
       video_path: postType === "video" ? body.video_path || null : null,
       video_url: postType === "video" ? body.video_url || null : null,

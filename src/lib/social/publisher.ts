@@ -29,6 +29,7 @@ import {
   ytStartVideoUpload,
 } from "./youtube";
 import { refreshDueMetrics } from "./metrics";
+import { CAPTION_LIMITS, TITLE_LIMITS } from "./limits";
 
 const MAX_ATTEMPTS = 3;
 /** Give Meta this long to transcode before we call the target dead. */
@@ -54,6 +55,37 @@ function targetCaption(post: SocialPost, target: SocialTarget): string {
   return target.caption_override ?? post.caption ?? "";
 }
 
+/**
+ * Final backstop before any platform API call: a caption/title that slipped
+ * past the composer and the create/edit API (e.g. via caption_override, or
+ * a post scheduled before the limit was tightened) must not reach Meta or
+ * YouTube — they'd reject it anyway, but only after we've already burned a
+ * container/upload attempt.
+ */
+function checkTargetLength(
+  target: SocialTarget,
+  caption: string,
+  title?: string
+): PublishStep | null {
+  const captionLimit = CAPTION_LIMITS[target.platform];
+  if (caption.length > captionLimit) {
+    return {
+      state: "failed",
+      error: `Caption is ${caption.length} chars, over ${target.platform}'s ${captionLimit}-char limit`,
+      retryable: false,
+    };
+  }
+  const titleLimit = TITLE_LIMITS[target.platform];
+  if (titleLimit && title && title.length > titleLimit) {
+    return {
+      state: "failed",
+      error: `Title is ${title.length} chars, over ${target.platform}'s ${titleLimit}-char limit`,
+      retryable: false,
+    };
+  }
+  return null;
+}
+
 /** First publish step for a pending image-post target (1 photo or a carousel). */
 async function beginCarouselPublish(
   post: SocialPost,
@@ -71,6 +103,8 @@ async function beginCarouselPublish(
     return { state: "failed", error: "Image post has no slides attached" };
   }
   const caption = targetCaption(post, target);
+  const lengthError = checkTargetLength(target, caption);
+  if (lengthError) return lengthError;
   if (!account.access_token) {
     return { state: "failed", error: `${target.platform} account has no token` };
   }
@@ -147,6 +181,8 @@ async function beginPublish(
   }
   if (!post.video_url) return { state: "failed", error: "Post has no video attached" };
   const caption = targetCaption(post, target);
+  const lengthError = checkTargetLength(target, caption, post.title || undefined);
+  if (lengthError) return lengthError;
 
   if (target.platform === "instagram") {
     if (!account.access_token) return { state: "failed", error: "Instagram account has no token" };

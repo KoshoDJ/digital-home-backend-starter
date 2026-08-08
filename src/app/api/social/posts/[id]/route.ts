@@ -14,6 +14,7 @@ import {
   CAROUSEL_PLATFORMS,
 } from "@/lib/social/types";
 import { deleteMediaObjects } from "@/lib/social/upload";
+import { checkLengthLimits, formatLengthViolations } from "@/lib/social/limits";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -111,6 +112,33 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
   if (body.status && ["draft", "scheduled", "canceled"].includes(body.status)) {
     update.status = body.status;
     if (body.status === "scheduled") update.error = null;
+  }
+
+  if (body.caption !== undefined || body.title !== undefined) {
+    const effectiveCaption = (update.caption as string | undefined) ?? post.caption ?? "";
+    const effectiveTitle = (update.title as string | null | undefined) ?? post.title ?? null;
+    const { data: existingTargets } = await supabase
+      .from("social_post_targets")
+      .select("platform")
+      .eq("post_id", id);
+    const platforms = new Set((existingTargets || []).map((t) => t.platform));
+    if (Array.isArray(body.account_ids) && body.account_ids.length) {
+      const { data: incomingAccounts } = await supabase
+        .from("social_accounts")
+        .select("platform")
+        .in("id", body.account_ids);
+      for (const a of incomingAccounts || []) platforms.add(a.platform);
+    }
+    const violations = checkLengthLimits(Array.from(platforms), {
+      caption: effectiveCaption,
+      title: effectiveTitle,
+    });
+    if (violations.length) {
+      return NextResponse.json(
+        { error: `Post is too long for the selected platform(s): ${formatLengthViolations(violations)}` },
+        { status: 400 }
+      );
+    }
   }
 
   // Re-arming for another run: put failed targets back in the queue.

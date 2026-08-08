@@ -41,8 +41,8 @@ import {
   SocialNav,
   TARGET_STATUS_DOTS,
 } from './social-kit';
+import { CAPTION_LIMIT } from '@/lib/social/limits';
 
-const CAPTION_LIMIT = 2200;
 const MAX_SLIDES = 10;
 
 // ── date helpers (calendar is Monday-first) ──────────────────────────────────
