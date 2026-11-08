@@ -36,7 +36,9 @@ fails closed with HTTP `503`. `occurred_at` must fall inside
 tenant identifiers are not used for authorization.
 
 `GET /api/integrations/cornerman/v1/conversions/{event_id}` returns the stored
-receipt for the configured environment, or a generic HTTP `404`.
+receipt for the configured environment (`200`). A missing receipt returns a
+generic HTTP `404`. A database lookup failure returns a generic HTTP `500`.
+Neither error exposes database details or personal information.
 
 Responses contain the receipt only: ids, hashes, counts, timestamps, and
 `result_status`. They never include names, emails, phone numbers, message
@@ -116,20 +118,29 @@ status `exited`.
 
 ## Send-race protection
 
-Closing an enrollment is not enough if the engine already selected it. Before
-the provider or safe-mode simulator is called, `reserve_workflow_dispatch_v1`
-locks the enrollment and lead, confirms the lead is not converted, confirms the
-enrollment is still active at the expected step, and inserts or recovers a
-durable reservation.
+Closing an enrollment is not enough if the engine already selected it. Conversion
+and reservation use one lock order: lead, then enrollment, then reservation.
+`reserve_workflow_dispatch_v1` reads the enrollment's lead id without locking,
+locks the lead, then locks and revalidates the enrollment before creating a
+reservation. The locked enrollment must still belong to the locked lead.
 
 - Conversion first: reservation fails; no provider or simulator call.
 - Reservation first: conversion still applies and reports `needs_review` plus
   the in-flight count.
-- A later engine write uses `status = 'active'`, so it cannot reactivate,
-  advance, or overwrite an enrollment conversion already exited.
+- A later engine write uses `status = 'active'` and checks that a row was
+  updated, so it cannot reactivate, complete, fail, or overwrite an enrollment
+  conversion already exited.
 - Duplicate ticks still use the existing `next_run_at` compare-and-swap.
-- A reserved row expires (default 10 minutes). The next tick may recover it.
-  This is not distributed exactly-once delivery.
+- A reserved row expires (default 10 minutes). A `failed` outcome is not
+  in-flight and may be recovered on the next tick. `sent`, `simulated`, and
+  `suppressed` remain immutable. This is not distributed exactly-once delivery.
+
+## Lead deletion
+
+`conversion_receipts.digital_home_lead_id` uses `ON DELETE CASCADE`, matching
+enrollments and dispatch reservations. Hard-deleting a lead removes its
+conversion receipts and associated reservations so no external identity
+evidence remains. This does not weaken the existing GDPR lead-deletion route.
 
 ## Staging key provisioning
 

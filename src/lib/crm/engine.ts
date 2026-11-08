@@ -430,7 +430,12 @@ async function executeStep(
         },
         settings
       );
-      if (result.status === "sent" || result.status === "simulated" || result.status === "suppressed") {
+      if (
+        result.status === "sent" ||
+        result.status === "simulated" ||
+        result.status === "suppressed" ||
+        result.status === "failed"
+      ) {
         await completeWorkflowDispatch(supabase, reserved.reservationId, result.status);
       }
       if (result.status === "sent") {
@@ -646,6 +651,27 @@ async function executeStep(
 
 // ── Enrollment processing ────────────────────────────────────────────────────
 
+async function updateActiveEnrollment(
+  supabase: AdminClient,
+  enrollmentId: string,
+  patch: {
+    status?: Enrollment["status"];
+    current_step?: number;
+    next_run_at?: string;
+    completed_at?: string | null;
+    last_error?: string | null;
+    context?: Json;
+  }
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("workflow_enrollments")
+    .update(patch)
+    .eq("id", enrollmentId)
+    .eq("status", "active")
+    .select("id");
+  return !error && Array.isArray(data) && data.length > 0;
+}
+
 async function processEnrollment(
   supabase: AdminClient,
   enrollment: Enrollment & { workflows: Workflow | null; leads: Lead | null },
@@ -688,31 +714,24 @@ async function processEnrollment(
       if (outcome.advance) stepIndex++;
 
       if (outcome.deferUntil) {
-        await supabase
-          .from("workflow_enrollments")
-          .update({
-            current_step: stepIndex,
-            next_run_at: outcome.deferUntil.toISOString(),
-            last_error: null,
-            context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts: 0 } as Json,
-          })
-          .eq("id", enrollment.id)
-          .eq("status", "active");
+        await updateActiveEnrollment(supabase, enrollment.id, {
+          current_step: stepIndex,
+          next_run_at: outcome.deferUntil.toISOString(),
+          last_error: null,
+          context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts: 0 } as Json,
+        });
         return;
       }
     }
 
     if (stepIndex >= steps.length) {
-      await supabase
-        .from("workflow_enrollments")
-        .update({
-          status: "completed",
-          current_step: stepIndex,
-          completed_at: new Date().toISOString(),
-          last_error: null,
-        })
-        .eq("id", enrollment.id)
-        .eq("status", "active");
+      const completed = await updateActiveEnrollment(supabase, enrollment.id, {
+        status: "completed",
+        current_step: stepIndex,
+        completed_at: new Date().toISOString(),
+        last_error: null,
+      });
+      if (!completed) return;
       await supabase
         .from("workflows")
         .update({ completed_count: (workflow.completed_count || 0) + 1 })
@@ -726,11 +745,10 @@ async function processEnrollment(
       summary.completed++;
     } else {
       // Hit the per-tick step budget; continue next tick
-      await supabase
-        .from("workflow_enrollments")
-        .update({ current_step: stepIndex, next_run_at: new Date().toISOString() })
-        .eq("id", enrollment.id)
-        .eq("status", "active");
+      await updateActiveEnrollment(supabase, enrollment.id, {
+        current_step: stepIndex,
+        next_run_at: new Date().toISOString(),
+      });
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : "unknown step error";
@@ -738,12 +756,13 @@ async function processEnrollment(
     summary.errors.push(`${workflow.name} → ${lead.email}: ${message}`);
 
     if (attempts >= MAX_ATTEMPTS) {
+      const failed = await updateActiveEnrollment(supabase, enrollment.id, {
+        status: "failed",
+        current_step: stepIndex,
+        last_error: message,
+      });
+      if (!failed) return;
       summary.failed++;
-      await supabase
-        .from("workflow_enrollments")
-        .update({ status: "failed", current_step: stepIndex, last_error: message })
-        .eq("id", enrollment.id)
-        .eq("status", "active");
       await logActivity(supabase, {
         lead_id: lead.id,
         activity_type: "workflow_failed",
@@ -752,16 +771,12 @@ async function processEnrollment(
         data: { workflow_id: workflow.id },
       });
     } else {
-      await supabase
-        .from("workflow_enrollments")
-        .update({
-          current_step: stepIndex,
-          next_run_at: new Date(Date.now() + RETRY_DELAY_MS).toISOString(),
-          last_error: message,
-          context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts } as Json,
-        })
-        .eq("id", enrollment.id)
-        .eq("status", "active");
+      await updateActiveEnrollment(supabase, enrollment.id, {
+        current_step: stepIndex,
+        next_run_at: new Date(Date.now() + RETRY_DELAY_MS).toISOString(),
+        last_error: message,
+        context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts } as Json,
+      });
     }
   }
 }

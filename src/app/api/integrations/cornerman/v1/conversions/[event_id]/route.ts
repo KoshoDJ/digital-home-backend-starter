@@ -24,9 +24,15 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const receipt = await readCornermanConversion(createAdminClient(), eventId, environment);
-  if (!receipt || receiptContainsPrivateData(receipt)) {
+  const result = await readCornermanConversion(createAdminClient(), eventId, environment);
+  if (result.status === "error") {
+    return NextResponse.json({ error: "Conversion could not be read" }, { status: 500 });
+  }
+  if (result.status === "not_found") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  return NextResponse.json({ receipt });
+  if (receiptContainsPrivateData(result.receipt)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ receipt: result.receipt });
 }

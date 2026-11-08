@@ -75,6 +75,21 @@ test("applied and identical replay return the public receipt", async () => {
   assert.equal(replay.ok, true);
   if (replay.ok) assert.equal(replay.code, "replay");
   const found = await readCornermanConversion(rpc(receipt()) as never, payload.event_id, "staging");
-  assert.equal(found?.event_id, payload.event_id);
-  assert.equal(found && "email" in found, false);
+  assert.equal(found.status, "found");
+  if (found.status === "found") {
+    assert.equal(found.receipt.event_id, payload.event_id);
+    assert.equal("email" in found.receipt, false);
+  }
+});
+
+test("receipt lookup distinguishes found, not found, and database error", async () => {
+  const found = await readCornermanConversion(rpc(receipt()) as never, payload.event_id, "staging");
+  assert.equal(found.status, "found");
+  if (found.status === "found") assert.equal(found.receipt.event_id, payload.event_id);
+
+  const missing = await readCornermanConversion(rpc(null) as never, payload.event_id, "staging");
+  assert.equal(missing.status, "not_found");
+
+  const failed = await readCornermanConversion(rpc(null, { message: "db" }) as never, payload.event_id, "staging");
+  assert.equal(failed.status, "error");
 });

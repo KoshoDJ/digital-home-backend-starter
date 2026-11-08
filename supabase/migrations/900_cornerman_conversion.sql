@@ -24,7 +24,7 @@ create table conversion_receipts (
   event_id uuid not null,
   schema_version integer not null,
   payload_hash text not null,
-  digital_home_lead_id uuid not null references leads(id),
+  digital_home_lead_id uuid not null references leads(id) on delete cascade,
   cornerman_enrollment_id uuid not null,
   cornerman_enrollment_version integer not null,
   correlation_id uuid not null,
@@ -203,6 +203,7 @@ declare
   v_enroll public.workflow_enrollments%rowtype;
   v_lead public.leads%rowtype;
   v_res public.workflow_dispatch_reservations%rowtype;
+  v_lead_id uuid;
   v_lease interval;
 begin
   if p_lease_seconds is null or p_lease_seconds < 1 then
@@ -210,13 +211,24 @@ begin
   end if;
   v_lease := make_interval(secs => p_lease_seconds);
 
-  select * into v_enroll from public.workflow_enrollments where id = p_enrollment_id for update;
+  -- Lock order matches conversion: lead, then enrollment, then reservation.
+  select lead_id into v_lead_id
+  from public.workflow_enrollments
+  where id = p_enrollment_id;
   if not found then
     return jsonb_build_object('ok', false, 'code', 'not_found');
   end if;
 
-  select * into v_lead from public.leads where id = v_enroll.lead_id for update;
+  select * into v_lead from public.leads where id = v_lead_id for update;
   if not found then
+    return jsonb_build_object('ok', false, 'code', 'not_found');
+  end if;
+
+  select * into v_enroll from public.workflow_enrollments where id = p_enrollment_id for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'code', 'not_found');
+  end if;
+  if v_enroll.lead_id is distinct from v_lead.id then
     return jsonb_build_object('ok', false, 'code', 'not_found');
   end if;
   if v_lead.status = 'converted' then

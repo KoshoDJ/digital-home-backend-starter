@@ -11,11 +11,6 @@ import pg from 'pg';
 const binaries = process.env.PG_BIN;
 if (!binaries) throw new Error('Set PG_BIN to local PostgreSQL server binaries. This test must not use a live database.');
 const env = { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C', PGCONNECT_TIMEOUT: '5' };
-const root = realpathSync(mkdtempSync('/tmp/dh-cornerman-'));
-chmodSync(root, 0o700);
-const data = join(root, 'cluster');
-const socket = join(root, 'socket');
-mkdirSync(socket, { mode: 0o700 });
 const pgBin = (name, args = []) => execFileSync(join(binaries, name), args, { env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
 const sqlFile = (name) => readFileSync(new URL('../supabase/migrations/' + name, import.meta.url), 'utf8');
 const FILES = [
@@ -26,11 +21,18 @@ const FILES = [
 const hash = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 async function withCluster(run) {
+  const root = realpathSync(mkdtempSync('/tmp/dh-cornerman-'));
+  chmodSync(root, 0o700);
+  const data = join(root, 'cluster');
+  const socket = join(root, 'socket');
+  mkdirSync(socket, { mode: 0o700 });
+  const port = 55000 + Math.floor(Math.random() * 2000);
+  const connect = () => new pg.Client({ host: socket, port, user: 'conversion_test', database: 'conversion' });
   pgBin('initdb', ['-D', data, '-U', 'conversion_test', '-A', 'trust', '--encoding=UTF8', '--no-locale']);
-  pgBin('pg_ctl', ['-D', data, '-l', join(root, 'postgres.log'), '-o', `-h '' -k ${socket} -p 55441`, '-w', 'start']);
+  pgBin('pg_ctl', ['-D', data, '-l', join(root, 'postgres.log'), '-o', `-h '' -k ${socket} -p ${port}`, '-w', 'start']);
   try {
-    pgBin('createdb', ['-h', socket, '-p', '55441', '-U', 'conversion_test', 'conversion']);
-    const admin = new pg.Client({ host: socket, port: 55441, user: 'conversion_test', database: 'conversion' });
+    pgBin('createdb', ['-h', socket, '-p', String(port), '-U', 'conversion_test', 'conversion']);
+    const admin = connect();
     await admin.connect();
     await admin.query(`create role anon; create role authenticated; create role service_role bypassrls;
       create schema storage; create table storage.buckets(id text primary key, name text, public boolean);
@@ -38,7 +40,7 @@ async function withCluster(run) {
       create extension if not exists "uuid-ossp";`);
     await admin.query(readFileSync(new URL('./fixtures/frontend-2.5.4.sql', import.meta.url), 'utf8'));
     for (const file of FILES) await admin.query(sqlFile(file));
-    await run(admin);
+    await run(admin, connect);
     await admin.end();
   } finally {
     try { pgBin('pg_ctl', ['-D', data, '-m', 'immediate', '-w', 'stop']); } catch { /* already stopped */ }
@@ -46,14 +48,14 @@ async function withCluster(run) {
   }
 }
 
-function client() {
-  return new pg.Client({ host: socket, port: 55441, user: 'conversion_test', database: 'conversion' });
-}
-
-async function seed(db) {
-  const lead = (await db.query("insert into leads(email, first_name) values('race@example.test','Pat') returning id")).rows[0].id;
+async function seed(db, label = 'race') {
+  const lead = (await db.query(
+    "insert into leads(email, first_name) values($1,'Pat') returning id",
+    [`${label}@example.test`]
+  )).rows[0].id;
   const workflow = (await db.query(
-    "insert into workflows(name, status, purpose, steps) values('nurture','active','prospect_nurture','[]') returning id"
+    "insert into workflows(name, status, purpose, steps) values($1,'active','prospect_nurture','[]') returning id",
+    [`nurture-${label}`]
   )).rows[0].id;
   const enrollment = (await db.query(
     'insert into workflow_enrollments(workflow_id, lead_id, status, current_step) values($1,$2,$3,0) returning id',
@@ -70,10 +72,10 @@ async function convert(db, lead, payload, eventId) {
 }
 
 test('actual dump-free local PostgreSQL serializes identical conversions and send races', async () => {
-  await withCluster(async (admin) => {
+  await withCluster(async (admin, connect) => {
     const { lead, enrollment } = await seed(admin);
-    const a = client();
-    const b = client();
+    const a = connect();
+    const b = connect();
     await a.connect();
     await b.connect();
     try {
@@ -126,6 +128,87 @@ test('actual dump-free local PostgreSQL serializes identical conversions and sen
       ]);
       const reserveCodes = [tickA.rows[0].result.code, tickB.rows[0].result.code].sort();
       assert.ok(reserveCodes.includes('converted') || reserveCodes.includes('not_active') || reserveCodes.includes('already_reserved'));
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+});
+
+async function waitUntilLockWait(admin, pid) {
+  for (let i = 0; i < 150; i++) {
+    const { rows } = await admin.query(
+      'select wait_event_type from pg_stat_activity where pid = $1',
+      [pid]
+    );
+    if (rows[0]?.wait_event_type === 'Lock') return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`pid ${pid} did not wait on a lock`);
+}
+
+test('overlapping conversion and reservation transactions serialize without deadlock', async () => {
+  await withCluster(async (admin, connect) => {
+    const a = connect();
+    const b = connect();
+    await a.connect();
+    await b.connect();
+    try {
+      for (const conn of [a, b]) {
+        await conn.query("set lock_timeout = '5s'");
+        await conn.query("set deadlock_timeout = '200ms'");
+      }
+
+      const conversionFirst = await seed(admin, 'convert-first');
+      const reservePid = (await b.query('select pg_backend_pid() as pid')).rows[0].pid;
+      await a.query('begin');
+      await a.query('select id from leads where id = $1 for update', [conversionFirst.lead]);
+      const blockedReserve = b.query(
+        'select public.reserve_workflow_dispatch_v1($1,0,600) as result',
+        [conversionFirst.enrollment]
+      );
+      await waitUntilLockWait(admin, reservePid);
+      const convertedFirst = await convert(
+        a,
+        conversionFirst.lead,
+        { lead: conversionFirst.lead },
+        '55555555-5555-4555-8555-555555555555'
+      );
+      await a.query('commit');
+      const reserveAfter = (await blockedReserve).rows[0].result;
+      assert.equal(convertedFirst.ok, true);
+      assert.equal(convertedFirst.code, 'applied');
+      assert.equal(reserveAfter.ok, false);
+      assert.ok(['converted', 'not_active'].includes(reserveAfter.code));
+      assert.equal(
+        (await admin.query('select count(*)::int as n from conversion_receipts where event_id=$1', [
+          '55555555-5555-4555-8555-555555555555',
+        ])).rows[0].n,
+        1
+      );
+
+      const reservationFirst = await seed(admin, 'reserve-first');
+      const convertPid = (await b.query('select pg_backend_pid() as pid')).rows[0].pid;
+      await a.query('begin');
+      await a.query('select id from leads where id = $1 for update', [reservationFirst.lead]);
+      const blockedConvert = convert(
+        b,
+        reservationFirst.lead,
+        { lead: reservationFirst.lead },
+        '66666666-6666-4666-8666-666666666666'
+      );
+      await waitUntilLockWait(admin, convertPid);
+      const reservedFirst = (await a.query(
+        'select public.reserve_workflow_dispatch_v1($1,0,600) as result',
+        [reservationFirst.enrollment]
+      )).rows[0].result;
+      await a.query('commit');
+      const convertAfter = await blockedConvert;
+      assert.equal(reservedFirst.ok, true);
+      assert.equal(reservedFirst.code, 'reserved');
+      assert.equal(convertAfter.ok, true);
+      assert.equal(convertAfter.code, 'needs_review');
+      assert.equal(convertAfter.receipt.in_flight_reservations, 1);
     } finally {
       await a.end();
       await b.end();

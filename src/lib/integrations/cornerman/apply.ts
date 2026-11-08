@@ -54,11 +54,16 @@ export async function applyCornermanConversion(
   return { ok: false, status: 500, error: "Conversion could not be applied" };
 }
 
+export type ReadConversionResult =
+  | { status: "found"; receipt: ConversionReceipt }
+  | { status: "not_found" }
+  | { status: "error" };
+
 export async function readCornermanConversion(
   supabase: AdminClient,
   eventId: string,
   environment: string
-): Promise<ConversionReceipt | null> {
+): Promise<ReadConversionResult> {
   const { data, error } = await supabase
     .from("conversion_receipts")
     .select(
@@ -68,6 +73,9 @@ export async function readCornermanConversion(
     .eq("environment", environment)
     .eq("event_id", eventId)
     .maybeSingle();
-  if (error || !data) return null;
-  return publicReceipt(data as Record<string, unknown>);
+  if (error) return { status: "error" };
+  if (!data) return { status: "not_found" };
+  const receipt = publicReceipt(data as Record<string, unknown>);
+  if (!receipt) return { status: "error" };
+  return { status: "found", receipt };
 }

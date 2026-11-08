@@ -146,6 +146,64 @@ test('a reserved dispatch makes conversion report needs_review and a converted l
   }
 });
 
+test('failed reservations are not in flight, can be recovered, and sent outcomes stay immutable', async () => {
+  const db = await open();
+  try {
+    const first = await seed(db, ['prospect_nurture']);
+    const enrollment = (await db.query('select id from workflow_enrollments where lead_id=$1', [first.lead])).rows[0].id;
+    const reserved = (await db.query('select public.reserve_workflow_dispatch_v1($1,0,600) as result', [enrollment])).rows[0].result;
+    const failed = (await db.query('select public.complete_workflow_dispatch_v1($1,$2) as result', [reserved.reservation_id, 'failed'])).rows[0].result;
+    assert.equal(failed.code, 'failed');
+    const converted = await convert(db, first.lead, hash({ failed: true }), '13131313-1313-4131-8131-131313131313');
+    assert.equal(converted.code, 'applied');
+    assert.equal(converted.receipt.in_flight_reservations, 0);
+
+    const retryLead = (await db.query("insert into leads(email, first_name) values('retry@example.test','Ray') returning id")).rows[0].id;
+    const retryEnrollment = (await db.query(
+      'insert into workflow_enrollments(workflow_id, lead_id, status, current_step) values($1,$2,$3,0) returning id',
+      [first.workflows.prospect_nurture, retryLead, 'active']
+    )).rows[0].id;
+    const retryReserved = (await db.query('select public.reserve_workflow_dispatch_v1($1,0,600) as result', [retryEnrollment])).rows[0].result;
+    await db.query('select public.complete_workflow_dispatch_v1($1,$2)', [retryReserved.reservation_id, 'failed']);
+    const recovered = (await db.query('select public.reserve_workflow_dispatch_v1($1,0,600) as result', [retryEnrollment])).rows[0].result;
+    assert.equal(recovered.ok, true);
+    assert.equal(recovered.recovered, true);
+    await db.query('select public.complete_workflow_dispatch_v1($1,$2)', [recovered.reservation_id, 'simulated']);
+    const immutable = (await db.query('select public.complete_workflow_dispatch_v1($1,$2) as result', [recovered.reservation_id, 'failed'])).rows[0].result;
+    assert.equal(immutable.code, 'already_dispatched');
+    assert.equal(
+      (await db.query('select status from workflow_dispatch_reservations where id=$1', [recovered.reservation_id])).rows[0].status,
+      'simulated'
+    );
+    const again = (await db.query('select public.reserve_workflow_dispatch_v1($1,0,600) as result', [retryEnrollment])).rows[0].result;
+    assert.equal(again.code, 'already_dispatched');
+  } finally {
+    await db.close();
+  }
+});
+
+test('deleting a converted lead removes receipts, exited enrollments, and reservations', async () => {
+  const db = await open();
+  try {
+    const { lead } = await seed(db, ['prospect_nurture']);
+    const enrollment = (await db.query('select id from workflow_enrollments')).rows[0].id;
+    const reserved = (await db.query('select public.reserve_workflow_dispatch_v1($1,0,600) as result', [enrollment])).rows[0].result;
+    assert.equal(reserved.ok, true);
+    const result = await convert(db, lead, hash({ delete: true }), '14141414-1414-4141-8141-141414141414');
+    assert.equal(result.code, 'needs_review');
+    assert.equal((await db.query('select count(*)::int as n from conversion_receipts')).rows[0].n, 1);
+    assert.equal((await db.query("select status from workflow_enrollments")).rows[0].status, 'exited');
+    assert.equal((await db.query('select count(*)::int as n from workflow_dispatch_reservations')).rows[0].n, 1);
+    await db.query('delete from leads where id = $1', [lead]);
+    assert.equal((await db.query('select count(*)::int as n from leads')).rows[0].n, 0);
+    assert.equal((await db.query('select count(*)::int as n from conversion_receipts')).rows[0].n, 0);
+    assert.equal((await db.query('select count(*)::int as n from workflow_enrollments')).rows[0].n, 0);
+    assert.equal((await db.query('select count(*)::int as n from workflow_dispatch_reservations')).rows[0].n, 0);
+  } finally {
+    await db.close();
+  }
+});
+
 test('stale reservations can be recovered and already dispatched steps are not reserved again', async () => {
   const db = await open();
   try {
