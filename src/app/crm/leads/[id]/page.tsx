@@ -137,6 +137,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [viewSend, setViewSend] = useState<SendView | null>(null);
   const [tlFilter, setTlFilter] = useState<'all' | 'emails' | 'notes' | 'system'>('all');
+  const [nowMs, setNowMs] = useState<number | null>(null);
 
   const openSend = async (sendId: string) => {
     try {
@@ -150,6 +151,7 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
   const load = useCallback(async () => {
     try {
       setDetail(await api<Detail>(`/api/crm/leads/${id}`));
+      setNowMs(Date.now());
     } catch (e) {
       show(e instanceof Error ? e.message : 'Failed to load lead', 'err');
     }
@@ -220,11 +222,12 @@ export default function LeadDetailPage({ params }: { params: Promise<{ id: strin
   const ft = detail.funnel_first_touch;
 
   // At-a-glance: what's next for this lead.
-  const nowMs = Date.now();
   const nextAppt =
-    [...detail.appointments]
-      .filter((a) => a.status === 'scheduled' && new Date(a.starts_at).getTime() > nowMs)
-      .sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0] ?? null;
+    nowMs === null
+      ? null
+      : ([...detail.appointments]
+          .filter((a) => a.status === 'scheduled' && new Date(a.starts_at).getTime() > nowMs)
+          .sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0] ?? null);
   const openTasks = detail.tasks.filter((t) => t.status === 'open');
 
   // One timeline: activities and appointments interleaved, grouped by day.
