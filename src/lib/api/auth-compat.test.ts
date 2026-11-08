@@ -101,3 +101,13 @@ test('cornerman conversion routes require a minted key with the exact scope and 
  assert.equal((await allowed.cornerman(request(minted,conversionPath,'POST',minted))).authenticated,true);
  assert.equal((await allowed.cornerman(request(minted,conversionGet,'GET',minted))).authenticated,true);
 });
+test('cornerman conversion still rejects an expired signed x-timestamp',async()=>{
+ const allowed=fixture({}, ['cornerman:conversion']);
+ const stale=String(Math.floor(Date.now()/1000)-1000);
+ const expired=new Request('https://test.invalid'+conversionPath,{method:'POST',headers:{
+  'x-api-key':minted,'x-timestamp':stale,
+  'x-signature':signing.computeSignature(minted,signing.buildSigningPayload('POST',conversionPath,stale,'')),
+ }});
+ assert.equal((await allowed.cornerman(expired)).authenticated,false);
+ assert.equal((await allowed.cornerman(request(minted,conversionPath,'POST',minted))).authenticated,true);
+});

@@ -31,9 +31,8 @@ or change CRM safe mode from this document.
 Unknown fields, a source other than `cornerman`, a status other than
 `enrolled`, or a schema version other than `1` are rejected. `environment` must
 equal `DIGITAL_HOME_INTEGRATION_ENV`. If that variable is missing the route
-fails closed with HTTP `503`. `occurred_at` must fall inside
-`CORNERMAN_CONVERSION_REPLAY_WINDOW_SECONDS` (default 300). Caller-supplied
-tenant identifiers are not used for authorization.
+fails closed with HTTP `503`. Caller-supplied tenant identifiers are not used
+for authorization.
 
 `GET /api/integrations/cornerman/v1/conversions/{event_id}` returns the stored
 receipt for the configured environment (`200`). A missing receipt returns a
@@ -52,7 +51,9 @@ Machine authentication only, using the existing minted-key and HMAC stack.
 - Exact scope `cornerman:conversion`.
 - Headers `x-timestamp` and `x-signature`, HMAC-SHA256 over
   `METHOD:pathname:timestamp:body`, compared in constant time.
-- Timestamp TTL is `API_REQUEST_SIGNATURE_TTL_SECONDS` (default 300).
+- Request-signature freshness is `API_REQUEST_SIGNATURE_TTL_SECONDS`
+  (default 300). That TTL is the anti-replay control. It is independent of
+  `occurred_at`.
 
 Browser sessions, master keys, legacy environment keys, and wildcard `*` keys
 are refused. There is no second authentication system.
@@ -76,6 +77,24 @@ curl -X POST "https://backend.example.test$PATH" \
 ```
 
 Never paste live credentials into this file, logs, or tickets.
+
+## Timestamps
+
+These clocks are not interchangeable.
+
+| Field | Meaning |
+|---|---|
+| `occurred_at` | Immutable CornerMan business-event time. Historical ISO-8601 values are accepted so a durable outbox can deliver after an outage. |
+| `received_at` | Digital Home transport-receipt time, set when the conversion is first stored. It never replaces `occurred_at`. |
+| `x-timestamp` | Signed HTTP request time. Stale signatures are rejected by `API_REQUEST_SIGNATURE_TTL_SECONDS`. |
+
+`occurred_at` must be a timezone-qualified ISO-8601 timestamp. It may be hours
+or days old. It may not claim an occurrence more than
+`CORNERMAN_CONVERSION_MAX_FUTURE_SKEW_SECONDS` (default 300) in the future.
+The canonical payload hash still includes the original `occurred_at`. An
+identical body can replay at any later time and return the original receipt.
+Changing only `occurred_at` under the same event ID is a conflicting payload
+(`409`).
 
 ## Identity
 
@@ -162,8 +181,10 @@ Use disposable local PostgreSQL or PGlite fixtures. Never a live project.
 
 ## Retry and reconciliation
 
-Retry a failed POST with the same body. If Digital Home already applied it, the
-response is the original receipt. Use GET by `event_id` when the POST
+Retry a failed POST with the same body, including after an outage longer than
+five minutes. Request signatures must still be fresh; the original
+`occurred_at` does not need to be. If Digital Home already applied the event,
+the response is the original receipt. Use GET by `event_id` when the POST
 acknowledgement was lost. Treat `needs_review` as applied-with-follow-up: a
 nurture send may already be in flight.
 

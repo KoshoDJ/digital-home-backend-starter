@@ -3,7 +3,9 @@ import { createHash } from "crypto";
 export const CORNERMAN_SOURCE = "cornerman";
 export const CORNERMAN_SCHEMA_VERSION = 1;
 export const CORNERMAN_CONVERSION_STATUS = "enrolled";
-export const DEFAULT_CONVERSION_REPLAY_WINDOW_SECONDS = 300;
+export const DEFAULT_CONVERSION_MAX_FUTURE_SKEW_SECONDS = 300;
+const ISO_8601_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -81,9 +83,13 @@ function isUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
 }
 
-export function conversionReplayWindowSeconds(env: Record<string, string | undefined> = process.env): number {
-  const raw = Number(env.CORNERMAN_CONVERSION_REPLAY_WINDOW_SECONDS || DEFAULT_CONVERSION_REPLAY_WINDOW_SECONDS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONVERSION_REPLAY_WINDOW_SECONDS;
+export function conversionMaxFutureSkewSeconds(env: Record<string, string | undefined> = process.env): number {
+  const raw = Number(env.CORNERMAN_CONVERSION_MAX_FUTURE_SKEW_SECONDS || DEFAULT_CONVERSION_MAX_FUTURE_SKEW_SECONDS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONVERSION_MAX_FUTURE_SKEW_SECONDS;
+}
+
+function isIso8601Timestamp(value: string): boolean {
+  return ISO_8601_TIMESTAMP.test(value) && Number.isFinite(Date.parse(value));
 }
 
 export function configuredIntegrationEnv(env: Record<string, string | undefined> = process.env): string | null {
@@ -137,15 +143,12 @@ export function parseConversionPayload(
   ) {
     return { ok: false, error: "Invalid request" };
   }
-  if (typeof input.occurred_at !== "string") {
+  if (typeof input.occurred_at !== "string" || !isIso8601Timestamp(input.occurred_at)) {
     return { ok: false, error: "Invalid request" };
   }
   const occurredAt = Date.parse(input.occurred_at);
-  if (!Number.isFinite(occurredAt)) {
-    return { ok: false, error: "Invalid request" };
-  }
-  const windowMs = conversionReplayWindowSeconds(env) * 1000;
-  if (Math.abs(nowMs - occurredAt) > windowMs) {
+  const skewMs = conversionMaxFutureSkewSeconds(env) * 1000;
+  if (occurredAt - nowMs > skewMs) {
     return { ok: false, error: "Invalid request" };
   }
 
