@@ -39,6 +39,8 @@ export const HOME_GUIDE={
   ...['GET','POST','PATCH'].map(method=>({method,path:'/api/crm/engagements/{id}/deliverables',scope:method==='GET'?'money:read':'money:write',purpose:'Read or maintain project deliverables.',approval:method==='GET'?'none':'owner instruction'})),
   ...['GET','POST','DELETE'].map(method=>({method,path:'/api/settings/agent-keys',scope:'owner only',purpose:'List, mint or revoke a scoped key. Never log a mint response.',approval:'owner'})),
   ...['GET','POST'].map(method=>({method,path:'/api/crm/fulfilment',scope:'owner only',purpose:'Inspect or add missing draft recipes; existing custom recipes are preserved.',approval:'owner'})),
+  {method:'POST',path:'/api/integrations/cornerman/v1/conversions',scope:'cornerman:conversion',purpose:'Apply a signed CornerMan conversion; Digital Home lead UUID only.',approval:'none'},
+  {method:'GET',path:'/api/integrations/cornerman/v1/conversions/{event_id}',scope:'cornerman:conversion',purpose:'Read the durable conversion receipt for reconciliation.',approval:'none'},
  ],
  coverage:'Discovery, Analytics, Money, events and key management. Capabilities mean code is present, not that migrations or payment setup are complete. Other legacy routes remain available to existing credentials; other scoped HTTP access remains restricted; MCP exposes reviewed tools and owner decisions use the owner-authorised signed HTTP connection in Buzz; no Approvals page is bundled.',
 };

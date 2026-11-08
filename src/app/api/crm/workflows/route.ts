@@ -5,7 +5,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateSessionOrApiKey, unauthorizedResponse } from "@/lib/api/auth";
 import { createAdminClient } from "@/lib/supabase/server";
-import { parseSteps } from "@/lib/crm/types";
+import { parseSteps, parseWorkflowPurpose } from "@/lib/crm/types";
 import type { Json } from "@/types/database";
 
 export async function GET(request: NextRequest) {
@@ -70,6 +70,8 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const name = typeof body.name === "string" ? body.name.trim() : "";
   if (!name) return NextResponse.json({ error: "name is required" }, { status: 400 });
+  const purpose = body.purpose == null ? "general" : parseWorkflowPurpose(body.purpose);
+  if (!purpose) return NextResponse.json({ error: "purpose must be general, prospect_nurture, customer_onboarding or transactional" }, { status: 400 });
 
   const supabase = createAdminClient();
   const { data, error } = await supabase
@@ -81,6 +83,7 @@ export async function POST(request: NextRequest) {
       trigger_config: (body.trigger_config || {}) as Json,
       steps: (Array.isArray(body.steps) ? body.steps : []) as Json,
       allow_reenrollment: body.allow_reenrollment === true,
+      purpose,
       status: "draft",
       ai_brief: (body.ai_brief || null) as Json,
     })

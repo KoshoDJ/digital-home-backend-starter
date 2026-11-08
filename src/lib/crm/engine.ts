@@ -2,6 +2,7 @@ import { onDealWon } from "@/lib/money/engagements";
 import { moneyDb } from "@/lib/money/db";
 import { isDealWon } from "@/lib/money/state";
 import { logActivity } from "./activity";
+import { completeWorkflowDispatch, reserveWorkflowDispatch } from "./dispatch-reservation";
 import { sendCrmEmail } from "./email";
 import { getCrmSettings } from "./settings";
 import { renderMergeTags } from "./merge";
@@ -307,6 +308,7 @@ export function nextAllowedSendTime(window: SendWindow | undefined, from: Date):
 interface StepOutcome {
   advance: boolean; // move to next step?
   deferUntil?: Date; // pause until this time (wait steps / send window)
+  halt?: boolean; // stop this enrollment without writing over an exit
 }
 
 async function executeStep(
@@ -391,6 +393,23 @@ async function executeStep(
       }
       if (!subject || !bodyMd) throw new Error("send_email: missing subject or body");
 
+      const reserved = await reserveWorkflowDispatch(
+        supabase,
+        enrollment.id,
+        stepIndex,
+        LEASE_MINUTES * 60
+      );
+      if (!reserved.ok) {
+        if (reserved.code === "already_dispatched") return { advance: true };
+        if (reserved.code === "already_reserved") {
+          return {
+            advance: false,
+            deferUntil: reserved.expiresAt ? new Date(reserved.expiresAt) : new Date(Date.now() + LEASE_MINUTES * 60_000),
+          };
+        }
+        return { advance: false, halt: true };
+      }
+
       const engagementName = (enrollment.context as Record<string, unknown> | null)?.engagement_name;
       const emailLead = typeof engagementName === "string"
         ? { ...lead, custom: { ...((lead.custom || {}) as Record<string, Json>), engagement_name: engagementName } }
@@ -411,6 +430,9 @@ async function executeStep(
         },
         settings
       );
+      if (result.status === "sent" || result.status === "simulated" || result.status === "suppressed") {
+        await completeWorkflowDispatch(supabase, reserved.reservationId, result.status);
+      }
       if (result.status === "sent") {
         summary.emails_sent++;
         if (summary.budget_remaining !== null) summary.budget_remaining--;
@@ -662,6 +684,7 @@ async function processEnrollment(
       );
       executed++;
 
+      if (outcome.halt) return;
       if (outcome.advance) stepIndex++;
 
       if (outcome.deferUntil) {
@@ -673,7 +696,8 @@ async function processEnrollment(
             last_error: null,
             context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts: 0 } as Json,
           })
-          .eq("id", enrollment.id);
+          .eq("id", enrollment.id)
+          .eq("status", "active");
         return;
       }
     }
@@ -687,7 +711,8 @@ async function processEnrollment(
           completed_at: new Date().toISOString(),
           last_error: null,
         })
-        .eq("id", enrollment.id);
+        .eq("id", enrollment.id)
+        .eq("status", "active");
       await supabase
         .from("workflows")
         .update({ completed_count: (workflow.completed_count || 0) + 1 })
@@ -704,7 +729,8 @@ async function processEnrollment(
       await supabase
         .from("workflow_enrollments")
         .update({ current_step: stepIndex, next_run_at: new Date().toISOString() })
-        .eq("id", enrollment.id);
+        .eq("id", enrollment.id)
+        .eq("status", "active");
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : "unknown step error";
@@ -716,7 +742,8 @@ async function processEnrollment(
       await supabase
         .from("workflow_enrollments")
         .update({ status: "failed", current_step: stepIndex, last_error: message })
-        .eq("id", enrollment.id);
+        .eq("id", enrollment.id)
+        .eq("status", "active");
       await logActivity(supabase, {
         lead_id: lead.id,
         activity_type: "workflow_failed",
@@ -733,7 +760,8 @@ async function processEnrollment(
           last_error: message,
           context: { ...((enrollment.context as Record<string, unknown>) || {}), attempts } as Json,
         })
-        .eq("id", enrollment.id);
+        .eq("id", enrollment.id)
+        .eq("status", "active");
     }
   }
 }

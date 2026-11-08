@@ -6,7 +6,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticateSessionOrApiKey, unauthorizedResponse } from "@/lib/api/auth";
 import { createAdminClient } from "@/lib/supabase/server";
-import { parseSteps, WORKFLOW_STEP_TYPES } from "@/lib/crm/types";
+import { parseSteps, parseWorkflowPurpose, WORKFLOW_STEP_TYPES } from "@/lib/crm/types";
 import type { WorkflowStep } from "@/lib/crm/types";
 import type { Json } from "@/types/database";
 
@@ -108,6 +108,11 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   if (body.trigger_type) updates.trigger_type = body.trigger_type;
   if ("trigger_config" in body) updates.trigger_config = (body.trigger_config || {}) as Json;
   if ("allow_reenrollment" in body) updates.allow_reenrollment = body.allow_reenrollment === true;
+  if ("purpose" in body) {
+    const purpose = parseWorkflowPurpose(body.purpose);
+    if (!purpose) return NextResponse.json({ error: "purpose must be general, prospect_nurture, customer_onboarding or transactional" }, { status: 400 });
+    updates.purpose = purpose;
+  }
   if ("ai_brief" in body) updates.ai_brief = (body.ai_brief || null) as Json;
 
   if ("steps" in body) {

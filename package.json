@@ -29,7 +29,10 @@
     "test:recovery-postgres": "node --test scripts/test-starter3-recovery.mjs",
     "test:mcp": "node --experimental-strip-types --test src/lib/mcp/*.test.ts src/lib/mcp/tools/*.test.ts src/lib/agent/*.test.ts",
     "test:schema-types": "node --test scripts/test-schema-types.mjs",
-    "test:fresh-install": "node --experimental-strip-types --test scripts/test-fresh-install.mjs"
+    "test:fresh-install": "node --experimental-strip-types --test scripts/test-fresh-install.mjs",
+    "test:cornerman": "node --experimental-strip-types --test src/lib/integrations/cornerman/*.test.ts",
+    "test:cornerman-sql": "node --test scripts/test-cornerman-sql.mjs",
+    "test:cornerman-postgres": "node --test scripts/test-cornerman-postgres.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",

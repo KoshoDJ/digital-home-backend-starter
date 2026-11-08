@@ -19,9 +19,13 @@ function fixture(overrides:Record<string,string>={}, grants=['events:read']) {
   './agent-keys':{verifyAgentKey:async()=>{keyLookups++;return {name:'simon',scopes:grants};}},
  };
  const js=ts.transpileModule(readFileSync(new URL('./auth.ts',import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
- const loaded={exports:{} as {authenticateSessionOrApiKey:(request:Request)=>Promise<AuthResult>;authenticateOwner:(request:Request)=>Promise<AuthResult>}};
+ const loaded={exports:{} as {
+  authenticateSessionOrApiKey:(request:Request)=>Promise<AuthResult>;
+  authenticateOwner:(request:Request)=>Promise<AuthResult>;
+  authenticateCornermanConversion:(request:Request)=>Promise<AuthResult>;
+ }};
  new Function('require','module','exports','process',js)((id:string)=>{assert.ok(id in dependencies,id);return dependencies[id];},loaded,loaded.exports,{env});
- return {auth:loaded.exports.authenticateSessionOrApiKey,owner:loaded.exports.authenticateOwner,lookups:()=>keyLookups};
+ return {auth:loaded.exports.authenticateSessionOrApiKey,owner:loaded.exports.authenticateOwner,cornerman:loaded.exports.authenticateCornermanConversion,lookups:()=>keyLookups};
 }
 function request(key:string,path='/api/events',method='GET',secret='test-signing',signed=true) {
  const time=String(Math.floor(Date.now()/1000));
@@ -70,4 +74,30 @@ test('owner approval connection permits signed master/admin and refuses ordinary
  }
  const session=await f.owner(new Request('https://test.invalid/api/agent/actions'));
  assert.equal(session.authenticated,true);if(session.authenticated)assert.equal(session.mode,'session');
+});
+
+const conversionPath='/api/integrations/cornerman/v1/conversions';
+const conversionGet=`${conversionPath}/11111111-1111-4111-8111-111111111111`;
+test('cornerman conversion routes require a minted key with the exact scope and a valid signature',async()=>{
+ assert.equal(scopedRouteAllowed('POST',conversionPath,['cornerman:conversion']),true);
+ assert.equal(scopedRouteAllowed('GET',conversionGet,['cornerman:conversion']),true);
+ assert.equal(scopedRouteAllowed('GET',conversionPath,['cornerman:conversion']),false);
+ assert.equal(scopedRouteAllowed('POST',conversionGet,['cornerman:conversion']),false);
+ const allowed=fixture({}, ['cornerman:conversion']);
+ assert.equal((await allowed.cornerman(new Request('https://test.invalid'+conversionPath,{method:'POST'}))).authenticated,false);
+ assert.equal((await allowed.cornerman(request('not-a-key',conversionPath,'POST'))).authenticated,false);
+ const wrongScope=fixture({}, ['leads:write']);
+ assert.equal((await wrongScope.cornerman(request(minted,conversionPath,'POST',minted))).authenticated,false);
+ const master=fixture();
+ assert.equal((await master.cornerman(request('test-master',conversionPath,'POST'))).authenticated,false);
+ assert.equal((await master.cornerman(request('test-old-agent',conversionPath,'POST'))).authenticated,false);
+ assert.equal((await allowed.cornerman(request(minted,conversionPath,'POST',minted,false))).authenticated,false);
+ assert.equal((await allowed.cornerman(request(minted,conversionPath,'POST','wrong-secret'))).authenticated,false);
+ const expired=new Request('https://test.invalid'+conversionPath,{method:'POST',headers:{
+  'x-api-key':minted,'x-timestamp':String(Math.floor(Date.now()/1000)-1000),
+  'x-signature':signing.computeSignature(minted,signing.buildSigningPayload('POST',conversionPath,String(Math.floor(Date.now()/1000)-1000),'')),
+ }});
+ assert.equal((await allowed.cornerman(expired)).authenticated,false);
+ assert.equal((await allowed.cornerman(request(minted,conversionPath,'POST',minted))).authenticated,true);
+ assert.equal((await allowed.cornerman(request(minted,conversionGet,'GET',minted))).authenticated,true);
 });

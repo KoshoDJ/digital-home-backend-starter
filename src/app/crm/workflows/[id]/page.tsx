@@ -27,6 +27,7 @@ type Workflow = {
   trigger_config: Record<string, unknown>;
   steps: Step[];
   allow_reenrollment: boolean;
+  purpose: 'general' | 'prospect_nurture' | 'customer_onboarding' | 'transactional';
 };
 type Template = { id: string; name: string; subject: string; preheader: string | null; body_md: string };
 type Enrollment = {
@@ -135,6 +136,7 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
           trigger_config: wf.trigger_config,
           steps: wf.steps,
           allow_reenrollment: wf.allow_reenrollment,
+          purpose: wf.purpose,
           ...extra,
         }),
       });
@@ -293,6 +295,22 @@ export default function WorkflowEditorPage({ params }: { params: Promise<{ id: s
                     />
                   </Field>
                 )}
+              </div>
+              <div className="mt-4">
+                <Field label="Purpose">
+                  <Select
+                    value={wf.purpose || 'general'}
+                    onChange={(e) => mutate({ purpose: e.target.value as Workflow['purpose'] })}
+                  >
+                    <option value="general">General</option>
+                    <option value="prospect_nurture">Prospect nurture</option>
+                    <option value="customer_onboarding">Customer onboarding</option>
+                    <option value="transactional">Transactional</option>
+                  </Select>
+                </Field>
+                <p className="text-xs text-zinc-600 mt-2">
+                  Only prospect nurture enrollments stop when a CornerMan conversion arrives.
+                </p>
               </div>
               <label className="flex items-center gap-2.5 mt-4 cursor-pointer">
                 <input

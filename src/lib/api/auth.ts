@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { createAdminClient, createClient } from "@/lib/supabase/server";
 import { buildSigningPayload, computeSignature, MASTER_AGENT, signaturesMatch, signingSecretFor } from "./signing";
-import { ENV_AGENT_KEY_VARS, hasScope, isMintedKeyFormat, WILDCARD_SCOPE, type Scope } from "./agent-key-scopes";
+import { ENV_AGENT_KEY_VARS, hasScope, isMintedKeyFormat, RESERVED_AGENT_NAMES, WILDCARD_SCOPE, type Scope } from "./agent-key-scopes";
 import { scopedRouteAllowed } from "./scoped-routes";
 import { verifyAgentKey } from "./agent-keys";
 
@@ -196,6 +196,33 @@ export async function authenticateOwner(request: NextRequest): Promise<AuthResul
   if (!auth.authenticated || auth.mode === "session") return auth;
   if (auth.agent === MASTER_AGENT && auth.scopes?.includes(WILDCARD_SCOPE)) return auth;
   return { authenticated: false, error: "Owner access required" };
+}
+
+/** Minted `bbk_...` key with the exact `cornerman:conversion` scope. Sessions,
+ * master, legacy env, and wildcard keys are refused. */
+export async function authenticateCornermanConversion(request: NextRequest): Promise<AuthResult> {
+  const apiKey = request.headers.get("x-api-key");
+  if (!apiKey) {
+    return { authenticated: false, error: "Missing x-api-key" };
+  }
+  const auth = await authenticateSessionOrApiKey(request);
+  if (!auth.authenticated) return auth;
+  if (auth.mode !== "api-key") {
+    return { authenticated: false, error: "API key required" };
+  }
+  const scopes = auth.scopes ?? [];
+  if (
+    !isMintedKeyFormat(apiKey) ||
+    auth.agent === MASTER_AGENT ||
+    RESERVED_AGENT_NAMES.has(auth.agent) ||
+    scopes.includes(WILDCARD_SCOPE)
+  ) {
+    return { authenticated: false, error: "This key is not authorised for this route" };
+  }
+  if (!scopes.includes("cornerman:conversion")) {
+    return { authenticated: false, error: "This key is not authorised for this route" };
+  }
+  return auth;
 }
 
 export function unauthorizedResponse(error: string = "Unauthorized") {

@@ -14,6 +14,8 @@ export const SCOPED_ROUTES: readonly {method:string; path:RegExp; scopes:readonl
  {method:'POST',path:/^\/api\/crm\/engagements\/[0-9a-f-]{36}\/deliverables$/,scopes:['money:write']},
  {method:'PATCH',path:/^\/api\/crm\/engagements\/[0-9a-f-]{36}\/deliverables$/,scopes:['money:write']},
  {method:'POST',path:/^\/api\/crm\/checkout$/,scopes:['money:checkout','money:write']},
+ {method:'POST',path:/^\/api\/integrations\/cornerman\/v1\/conversions$/,scopes:['cornerman:conversion']},
+ {method:'GET',path:/^\/api\/integrations\/cornerman\/v1\/conversions\/[0-9a-f-]{36}$/i,scopes:['cornerman:conversion']},
 ];
 export function scopedRouteAllowed(method:string,path:string,scopes:readonly string[]):boolean {
  if(scopes.includes('*')) return true;

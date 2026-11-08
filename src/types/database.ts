@@ -595,6 +595,71 @@ export type Database = {
           },
         ]
       }
+      conversion_receipts: {
+        Row: {
+          applied_at: string | null
+          cornerman_enrollment_id: string
+          cornerman_enrollment_version: number
+          correlation_id: string
+          diagnostics: Json
+          digital_home_lead_id: string
+          environment: string
+          event_id: string
+          id: string
+          in_flight_reservations: number
+          payload_hash: string
+          producer: string
+          prospect_nurture_exited: number
+          received_at: string
+          result_status: string
+          schema_version: number
+        }
+        Insert: {
+          applied_at?: string | null
+          cornerman_enrollment_id: string
+          cornerman_enrollment_version: number
+          correlation_id: string
+          diagnostics?: Json
+          digital_home_lead_id: string
+          environment: string
+          event_id: string
+          id?: string
+          in_flight_reservations?: number
+          payload_hash: string
+          producer: string
+          prospect_nurture_exited?: number
+          received_at?: string
+          result_status: string
+          schema_version: number
+        }
+        Update: {
+          applied_at?: string | null
+          cornerman_enrollment_id?: string
+          cornerman_enrollment_version?: number
+          correlation_id?: string
+          diagnostics?: Json
+          digital_home_lead_id?: string
+          environment?: string
+          event_id?: string
+          id?: string
+          in_flight_reservations?: number
+          payload_hash?: string
+          producer?: string
+          prospect_nurture_exited?: number
+          received_at?: string
+          result_status?: string
+          schema_version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "conversion_receipts_digital_home_lead_id_fkey"
+            columns: ["digital_home_lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       crm_custom_fields: {
         Row: {
           created_at: string | null
@@ -2474,12 +2539,73 @@ export type Database = {
           },
         ]
       }
+      workflow_dispatch_reservations: {
+        Row: {
+          enrollment_id: string
+          expires_at: string
+          id: string
+          lead_id: string
+          outcome_at: string | null
+          reserved_at: string
+          status: Database["public"]["Enums"]["dispatch_reservation_status"]
+          step_number: number
+          workflow_id: string
+        }
+        Insert: {
+          enrollment_id: string
+          expires_at: string
+          id?: string
+          lead_id: string
+          outcome_at?: string | null
+          reserved_at?: string
+          status?: Database["public"]["Enums"]["dispatch_reservation_status"]
+          step_number: number
+          workflow_id: string
+        }
+        Update: {
+          enrollment_id?: string
+          expires_at?: string
+          id?: string
+          lead_id?: string
+          outcome_at?: string | null
+          reserved_at?: string
+          status?: Database["public"]["Enums"]["dispatch_reservation_status"]
+          step_number?: number
+          workflow_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workflow_dispatch_reservations_enrollment_id_fkey"
+            columns: ["enrollment_id"]
+            isOneToOne: false
+            referencedRelation: "workflow_enrollments"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workflow_dispatch_reservations_lead_id_fkey"
+            columns: ["lead_id"]
+            isOneToOne: false
+            referencedRelation: "leads"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workflow_dispatch_reservations_workflow_id_fkey"
+            columns: ["workflow_id"]
+            isOneToOne: false
+            referencedRelation: "workflows"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       workflow_enrollments: {
         Row: {
           completed_at: string | null
           context: Json
           current_step: number
           enrolled_at: string | null
+          exit_event_id: string | null
+          exit_reason: string | null
+          exited_at: string | null
           id: string
           last_error: string | null
           lead_id: string
@@ -2492,6 +2618,9 @@ export type Database = {
           context?: Json
           current_step?: number
           enrolled_at?: string | null
+          exit_event_id?: string | null
+          exit_reason?: string | null
+          exited_at?: string | null
           id?: string
           last_error?: string | null
           lead_id: string
@@ -2504,6 +2633,9 @@ export type Database = {
           context?: Json
           current_step?: number
           enrolled_at?: string | null
+          exit_event_id?: string | null
+          exit_reason?: string | null
+          exited_at?: string | null
           id?: string
           last_error?: string | null
           lead_id?: string
@@ -2538,6 +2670,7 @@ export type Database = {
           enrolled_count: number
           id: string
           name: string
+          purpose: Database["public"]["Enums"]["workflow_purpose"]
           status: Database["public"]["Enums"]["workflow_status"]
           steps: Json
           trigger_config: Json
@@ -2553,6 +2686,7 @@ export type Database = {
           enrolled_count?: number
           id?: string
           name: string
+          purpose?: Database["public"]["Enums"]["workflow_purpose"]
           status?: Database["public"]["Enums"]["workflow_status"]
           steps?: Json
           trigger_config?: Json
@@ -2568,6 +2702,7 @@ export type Database = {
           enrolled_count?: number
           id?: string
           name?: string
+          purpose?: Database["public"]["Enums"]["workflow_purpose"]
           status?: Database["public"]["Enums"]["workflow_status"]
           steps?: Json
           trigger_config?: Json
@@ -2581,6 +2716,24 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      apply_cornerman_conversion_v1: {
+        Args: {
+          p_producer: string
+          p_environment: string
+          p_event_id: string
+          p_schema_version: number
+          p_payload_hash: string
+          p_lead_id: string
+          p_cornerman_enrollment_id: string
+          p_cornerman_enrollment_version: number
+          p_correlation_id: string
+        }
+        Returns: Json
+      }
+      complete_workflow_dispatch_v1: {
+        Args: { p_reservation_id: string; p_outcome: string }
+        Returns: Json
+      }
       home_event_counts: {
         Args: { since: string }
         Returns: {
@@ -2592,6 +2745,14 @@ export type Database = {
       scrub_home_events_for_lead: {
         Args: { p_lead_id: string }
         Returns: number
+      }
+      reserve_workflow_dispatch_v1: {
+        Args: {
+          p_enrollment_id: string
+          p_step_number: number
+          p_lease_seconds?: number
+        }
+        Returns: Json
       }
     }
     Enums: {
@@ -2627,6 +2788,13 @@ export type Database = {
         | "snippet"
       conversation_channel: "web_chat" | "whatsapp"
       conversation_status: "active" | "closed" | "archived"
+      dispatch_reservation_status:
+        | "reserved"
+        | "sent"
+        | "simulated"
+        | "suppressed"
+        | "failed"
+        | "expired"
       crm_task_status: "open" | "done"
       email_event_type:
         | "delivered"
@@ -2675,6 +2843,11 @@ export type Database = {
         | "simulated"
         | "suppressed"
       sequence_status: "active" | "paused" | "archived"
+      workflow_purpose:
+        | "general"
+        | "prospect_nurture"
+        | "customer_onboarding"
+        | "transactional"
       workflow_status: "draft" | "active" | "paused" | "archived"
     }
     CompositeTypes: {

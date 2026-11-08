@@ -12,4 +12,5 @@ export const SCOPES = [
   "money:read",
   "money:write",
   "money:checkout",
+  "cornerman:conversion",
 ] as const;

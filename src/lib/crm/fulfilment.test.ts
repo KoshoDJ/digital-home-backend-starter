@@ -49,6 +49,10 @@ const engine = moduleUnderTest<typeof import("./engine.ts") & {
 }>("./engine.ts", {
   "./activity": activity, "@/lib/money/engagements": {}, "@/lib/money/db": {}, "@/lib/money/state": {},
   "./email": email, "./settings": {}, "./merge": merge, "./scoring": {}, "./alerts": {}, "./abtest": {},
+  "./dispatch-reservation": {
+    reserveWorkflowDispatch: async () => ({ ok: true, code: "reserved", reservationId: "test-reservation", recovered: false, expiresAt: null }),
+    completeWorkflowDispatch: async () => {},
+  },
   "./retention": { SKOOL_TAGS: [] }, "./bookings": {}, "./health": {}, "./pagination": {},
   "./types": { parseSteps: (steps: unknown) => steps },
 }, "\nexport { executeStep };\n");

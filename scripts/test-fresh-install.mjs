@@ -18,11 +18,11 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const frontend = findFrontend(process.env.STARTER_FRONTEND_PATH, backendRoots(root)).path;
 assert.ok(frontend, 'Set STARTER_FRONTEND_PATH to the paired frontend checkout.');
 import { install } from './fresh-install.mjs';
-const files = [...listMigrations(join(frontend,'supabase/migrations'),'frontend'), ...listMigrations(join(root,'supabase/migrations'),'backend')];
+const files = [...listMigrations(join(frontend,'supabase/migrations'),'frontend'), ...listMigrations(join(root,'supabase/migrations'),'backend')].filter((file) => file.starterOwned);
 assert.equal(files.length,19);
 const project = 'testprojectreference';
 const receipts = files.map(({ repo, name, checksum }) => ({ project, repo, name, checksum }));
-const recordSql = () => historySql(pairedMigrations(root, frontend), receipts, project);
+const recordSql = () => historySql(files, receipts, project);
 async function rawInstall(skip) {
   const db = new PGlite({extensions:{uuid_ossp}});
   await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
@@ -103,12 +103,19 @@ test('generation refuses a skipped frontend, modified official SQL or custom mig
     const migration=join(dir,'frontend/supabase/migrations/001_visitors.sql');
     const original=readFileSync(migration,'utf8');
     writeFileSync(migration,'\uFEFF'+original.replaceAll('\n','\r\n'));
-    assert.equal(pairedMigrations(root,copy).length,19);
+    assert.throws(()=>pairedMigrations(root,copy),/Member migrations found/);
+    const officialBackend=join(dir,'official-backend');
+    mkdirSync(join(officialBackend,'supabase/migrations'),{recursive:true});
+    for (const name of ['VERSION','RELEASE-PAIR.json']) cpSync(join(root,name),join(officialBackend,name));
+    for (const file of files.filter((item)=>item.repo==='backend')) {
+      cpSync(join(root,'supabase/migrations',file.name),join(officialBackend,'supabase/migrations',file.name));
+    }
+    assert.equal(pairedMigrations(officialBackend,copy).length,19);
     writeFileSync(migration,original+'\n-- changed');
-    assert.throws(()=>pairedMigrations(root,join(dir,'frontend')),/hash mismatch/);
+    assert.throws(()=>pairedMigrations(officialBackend,join(dir,'frontend')),/hash mismatch/);
     writeFileSync(migration,original);
     writeFileSync(join(dir,'frontend/supabase/migrations/900_member.sql'),'create table member_data(id int);');
-    assert.throws(()=>pairedMigrations(root,join(dir,'frontend')),/Member migrations found/);
+    assert.throws(()=>pairedMigrations(officialBackend,join(dir,'frontend')),/Member migrations found/);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 

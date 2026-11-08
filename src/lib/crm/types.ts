@@ -77,6 +77,21 @@ export interface CrmSettings {
   funnel_secret: string | null;
 }
 
+export const WORKFLOW_PURPOSES = [
+  "general",
+  "prospect_nurture",
+  "customer_onboarding",
+  "transactional",
+] as const;
+
+export type WorkflowPurpose = (typeof WORKFLOW_PURPOSES)[number];
+
+export function parseWorkflowPurpose(value: unknown): WorkflowPurpose | null {
+  return typeof value === "string" && (WORKFLOW_PURPOSES as readonly string[]).includes(value)
+    ? (value as WorkflowPurpose)
+    : null;
+}
+
 export const WORKFLOW_STEP_TYPES: WorkflowStepType[] = [
   "send_email",
   "wait",
